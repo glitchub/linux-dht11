@@ -77,16 +77,16 @@ static irqreturn_t doirq(int irq, void *unused)
 }
 
 // Thread polls DHT11 every 2 seconds and tracks temperature and humidity
-int valid, temperature, humidity;           // results
+int valid, temperature, humidity;           // results (default 0)
 struct mutex mutex;                         // arbitrate with doread
 static int dothread(void *pv)
 {
-    int await = 0;                          // count 100mS intervals to next poll
+    int await = 0;                          // number of 100mS intervals to next poll
     int final;                              // terminal ISR state
 
     while (!kthread_should_stop())
     {
-        msleep(100);                        // every 100 mS
+        msleep(100);                        // about every 100 mS
         if (--await > 0) continue;          // spin until 2 seconds
 
         // Prime the ISR
@@ -117,22 +117,32 @@ static int dothread(void *pv)
         else
         {
             if (valid) valid--;
-            pr_err("dht11 error final=%d data=%02X %02X %02X %02X %02X\n", final, data[0], data[1], data[2], data[3], data[4]);
+            pr_err("dht11: error, final = %d data = %02X %02X %02X %02X %02X\n", final, data[0], data[1], data[2], data[3], data[4]);
         }
         await = 2000/100;                   // another 2 seconds
     }
     return 0;
 }
 
-#define MAXS 32
+#define MAXS 32 // longest string to read
 
+// open file and assign string space
+static int doopen(struct inode *inode, struct file *filp)
+{
+    filp->private_data = kmalloc(MAXS, GFP_KERNEL);
+    if (!filp->private_data) return -ENOMEM;
+    *(char *)filp->private_data = 0;
+    return 0;
+}
+
+// read current humidity and temperature
 static ssize_t doread(struct file *filp, char __user *buf, size_t length, loff_t *ofs)
 {
     ssize_t n;
 
     if (*ofs)
     {
-        // return remainder of last read
+        // remainder from last read
         n = strlen(filp->private_data) - *ofs;
         if (n <= 0) return 0;
     } else
@@ -148,14 +158,7 @@ static ssize_t doread(struct file *filp, char __user *buf, size_t length, loff_t
     return n;
 }
 
-static int doopen(struct inode *inode, struct file *filp)
-{
-    filp->private_data = kmalloc(MAXS, GFP_KERNEL);
-    if (!filp->private_data) return -ENOMEM;
-    *(char *)filp->private_data = 0;
-    return 0;
-}
-
+// close file and free string
 static int doclose(struct inode *inode, struct file *filp)
 {
     kfree(filp->private_data);
@@ -175,7 +178,7 @@ static struct miscdevice miscdev =
     .minor = MISC_DYNAMIC_MINOR,
     .name = "dht11",
     .fops = &fops,
-    .mode = 0666
+    .mode = 0444 // world readable
 };
 
 int irq;                     // gpio IRQ number
@@ -183,23 +186,19 @@ struct task_struct *thread;  // poll thread
 
 static int __init doinit(void)
 {
-    if (gpio < 0 || gpio > 999)
+    pr_info("dht11: installing on gpio %d\n", gpio);
+
+    if (gpio_request(gpio, "dht11") < 0)
     {
-        pr_err("dht11 gpio must be 0 to 999\n");
+        pr_err("dht11: gpio_request failed\n");
         return -EINVAL;
     }
 
     mutex_init(&mutex);
 
-    if (gpio_request(gpio, "dht11") < 0)
-    {
-        pr_err("dht11 gpio_request failed\n");
-        return -EINVAL;
-    }
-
     if (misc_register(&miscdev))
     {
-        pr_err("dht11 misc_register failed\n");
+        pr_err("dht11: misc_register failed\n");
         rmgpio:
         gpio_free(gpio);
         return -EINVAL;
@@ -208,7 +207,7 @@ static int __init doinit(void)
     irq = gpio_to_irq(gpio);
     if (irq <= 0 || request_irq(irq, doirq, IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING, "dht11", NULL) < 0)
     {
-        pr_err("dht11 request_irq %d failed\n", irq);
+        pr_err("dht11: request_irq %d failed\n", irq);
         rmmisc:
         misc_deregister(&miscdev);
         goto rmgpio;
@@ -217,11 +216,9 @@ static int __init doinit(void)
     thread = kthread_run(dothread, NULL, "dht11");
     if (!thread)
     {
-        pr_err("dht11 kthread_create failed\n");
+        pr_err("dht11: kthread_create failed\n");
         goto rmmisc;
     }
-
-    pr_info("dht11 is installed on gpio %d\n", gpio);
 
     return 0;
 }
