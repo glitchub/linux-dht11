@@ -1,0 +1,10 @@
+dht11.ko
+.dht11.ko.cmd
+dht11.mod.c
+dht11.mod.o
+.dht11.mod.o.cmd
+dht11.o
+.dht11.o.cmd
+modules.order
+Module.symvers
+.tmp_versions/*
